@@ -1,0 +1,939 @@
+---
+title: "HousePricesAdvancedRegression"
+author: "Bryan Medina"
+date: "3/18/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Imagine asking a home buyer to describe their dream house, they probably won't begin with the height of the basement ceiling or the proximity to an east-west railroad. However, this playground competition's data set proves there are more that influences price negotiations than the number of bedrooms or a white-picket fence. With 79 explanatory variables describing (almost) every aspect of residential homes in Ames, Iowa, this competition challenges you to predict the final price of each home.
+
+loading relevant libraries and packages
+```{r}
+library(dplyr)
+library(corrplot)
+library(ggplot2)
+library(GGally)
+library(glmnet)
+library(arsenal)
+library(tidyverse)
+library(xgboost)
+library(caret)
+library(vtreat)
+library(Metrics)
+library(plyr)
+library(magrittr)
+library(e1071) 
+library(scales)
+library(ranger)
+set.seed(42)
+```
+
+
+using custom rmse calc function as that is what kaggle uses to measure model accuracy
+```{r}
+rmse <- function(actual, predicted) {
+            sqrt(mean((predicted - actual)^2))
+}
+```
+
+
+loading data sets and adding a new variable to the data sets
+```{r}
+train.df<- read.csv("C:/Personal/BC Woods/Data Analysis/train.csv")
+
+train.df<- train.df %>% mutate(label= "train")
+
+dim(train.df)
+
+test.df<-read.csv("C:/Personal/BC Woods/Data Analysis/test.csv")
+
+test.df<- test.df %>% mutate(label= "test")
+
+dim(test.df)
+```
+Noticed the train data frame contains 1460 observations and 81 different categorical variables while the test test data frame contains 1459 observations and 80 categorical variables. 
+
+Reviewing the structure of the data
+```{r}
+str(test.df)
+```
+
+```{r}
+str(train.df)
+```
+There are features within the categorical variables that have integers and others with characters
+
+
+Reviewing data quality 
+```{r}
+as.data.frame(test.df)
+```
+
+
+```{r}
+as.data.frame(train.df)
+```
+
+Both the test and train data frame are filled with NA records which will cause errors when trying to run multiple regressions to build my predictive model. Found a very useful library to compare the two data frames and summarize results. 
+
+
+```{r}
+summary(comparedf(test.df,train.df))
+```
+Before we get to handling the data, I made some adjustments to an aggregate categorical variable and removed observations that had more than 6 standard deviations from the mean 
+
+creating an aggregate SF categorical variable using all of the floors including the basement and garage area
+```{r}
+train.df <- train.df %>%
+            mutate(total_building_SF =  dplyr::select(., X1stFlrSF, X2ndFlrSF, TotalBsmtSF, GarageArea) %>% rowSums(na.rm = TRUE))
+```
+
+
+filter here removes outliers in the training data used for the model
+```{r}
+train.df <- train.df %>%
+            mutate(total_building_SF_zscore = (total_building_SF - mean(train.df$total_building_SF))/
+                    sd(train.df$total_building_SF)) %>%
+            filter(total_building_SF_zscore <= 6) %>%
+            dplyr::select(-total_building_SF_zscore, -total_building_SF)
+```
+
+The train data frame has the additional variable of SalePrice. Using the summary function on comparedf I was able to find counts for NA's, there are a large number that will need to be cleaned up for the following variables: LotFrontage, Alley, Utilities,   FireplaceQu, GarageQual, GarageCond, Fence, and MiscFeature. Another concerning summary statistic is that there are 80 variables with some values unequal so I will need to be careful when  training my model and make adjustments for when it comes time to test. 
+
+##################################################################
+#Handling missing data
+##################################################################
+
+First thing we'll need to do is either populate or remove missing records. 
+
+I'll investigate then populate each of the categorical variables with NA records and then populate with either a common character string or the mean of the column.
+
+
+Start with our test data frame then proceed with train data frame if necessary
+```{r}
+
+#checking null values for MSZoning in test
+sum(is.na(test.df$MSZoning))
+#count is 4
+
+#Updating null values to 'RL'
+test.df$MSZoning[which(is.na(test.df$MSZoning))] <-'RL'
+
+#checking null values in test after update
+sum(is.na(test.df$MSZoning))
+#count is 0
+
+#checking null values for MSZoning in train
+sum(is.na(train.df$MSZoning))
+#count is 0
+```
+
+For LotFrontage we will set NA records to equal the mean
+```{r}
+#Check sum of NA records in test
+sum(is.na(test.df$LotFrontage))
+#227
+
+#Update NA columns in test with column mean for LotFrontage
+test.df$LotFrontage[which(is.na(test.df$LotFrontage))] <-mean(test.df$LotFrontage, na.rm=TRUE)
+
+#Check sum of NA records in test
+sum(is.na(test.df$LotFrontage))
+#count is 0
+
+#Check sum of NA records in train
+sum(is.na(train.df$LotFrontage))
+#259
+
+#Update NA columns with column mean
+train.df$LotFrontage[which(is.na(train.df$LotFrontage))] <-mean(train.df$LotFrontage, na.rm=TRUE)
+
+#Check sum of NA records
+sum(is.na(train.df$LotFrontage))
+#count is 0
+```
+
+FRom my comparedf function I can see that 'Alley' in my test df is almost entirely NULL records
+```{r}
+#check count of null
+sum(is.na(test.df$Alley))
+#count is 1352
+
+#remove Alley from data frame
+test.df$Alley <- NULL
+
+#check count of null
+sum(is.na(test.df$Alley))
+#count is 0
+
+
+sum(is.na(train.df$Alley))
+#1369
+
+train.df$Alley <- NULL
+
+
+sum(is.na(train.df$Alley))
+#count is 0
+```
+
+
+Utilities
+```{r}
+sum(is.na(test.df$Utilities))
+#count is 2
+
+test.df$Utilities[which(is.na(test.df$Utilities))] <- 'AllPub'
+
+sum(is.na(test.df$Utilities))
+#count is 0
+
+sum(is.na(train.df$Utilities))
+# count is 0
+
+```
+
+Exterior1st
+```{r}
+sum(is.na(test.df$Exterior1st))
+#count is 1
+
+test.df$Exterior1st[which(is.na(test.df$Exterior1st))] <- 'BrkFace'
+
+sum(is.na(test.df$Exterior1st))
+#Count is 0
+
+sum(is.na(train.df$Exterior1st))
+#count is 0
+```
+
+Exterior2nd
+```{r}
+sum(is.na(test.df$Exterior2nd))
+#count is 1
+
+test.df$Exterior2nd[which(is.na(test.df$Exterior2nd))] <- 'AsbShng'
+
+sum(is.na(test.df$Exterior2nd))
+#count is 0
+
+sum(is.na(train.df$Exterior2nd))
+#count is 0
+```
+
+MasVnrType
+```{r}
+sum(is.na(test.df$MasVnrType))
+#count is 16
+
+test.df$MasVnrType[which(is.na(test.df$MasVnrType))] <- 'None'
+
+sum(is.na(test.df$MasVnrType))
+#count is 0
+
+sum(is.na(train.df$MasVnrType))
+#count is 8
+
+train.df$MasVnrType[which(is.na(train.df$MasVnrType))] <- 'None'
+
+sum(is.na(train.df$MasVnrType))
+#count is 0
+```
+
+MasVnrArea
+```{r}
+sum(is.na(test.df$MasVnrArea))
+#count is 15
+
+test.df$MasVnrArea[which(is.na(test.df$MasVnrArea))] <-mean(test.df$MasVnrArea, na.rm=TRUE)
+
+sum(is.na(test.df$MasVnrArea))
+#count is 0
+
+sum(is.na(train.df$MasVnrArea))
+#count is 8
+
+
+train.df$MasVnrArea[which(is.na(train.df$MasVnrArea))] <-mean(train.df$MasVnrArea, na.rm=TRUE)
+
+sum(is.na(train.df$MasVnrArea))
+#count is 8
+```
+
+BsmtQual
+```{r}
+sum(is.na(test.df$BsmtQual))
+#count is 8
+
+test.df$BsmtQual[which(is.na(test.df$BsmtQual))]<- 'TA'
+
+sum(is.na(test.df$BsmtQual))
+#count is 0
+
+sum(is.na(train.df$BsmtQual))
+#count is 37
+
+train.df$BsmtQual[which(is.na(train.df$BsmtQual))]<- 'TA'
+
+sum(is.na(train.df$BsmtQual))
+#count is 0
+```
+
+BsmtCond
+```{r}
+sum(is.na(test.df$BsmtCond))
+#count is 45
+
+test.df$BsmtCond[which(is.na(test.df$BsmtCond))]<- 'Gd'
+
+sum(is.na(test.df$BsmtCond))
+#count is 0
+
+sum(is.na(train.df$BsmtCond))
+#count is 37
+
+train.df$BsmtCond[which(is.na(train.df$BsmtCond))]<- 'Gd'
+
+sum(is.na(train.df$BsmtCond))
+#count is 0
+```
+
+BsmtExposure
+```{r}
+sum(is.na(test.df$BsmtExposure))
+#count is 44
+
+test.df$BsmtExposure[which(is.na(test.df$BsmtExposure))]<- 'Mn'
+
+sum(is.na(test.df$BsmtExposure))
+#count is 0
+
+sum(is.na(train.df$BsmtExposure))
+#count is 38
+
+train.df$BsmtExposure[which(is.na(train.df$BsmtExposure))]<- 'Mn'
+
+sum(is.na(train.df$BsmtExposure))
+#count is 0
+```
+
+BsmtFinType1
+```{r}
+sum(is.na(test.df$BsmtFinType1))
+#count is 42
+
+test.df$BsmtFinType1[which(is.na(test.df$BsmtFinType1))]<- 'LwQ'
+
+sum(is.na(test.df$BsmtFinType1))
+#count is 0
+
+sum(is.na(train.df$BsmtFinType1))
+#count is 37
+
+train.df$BsmtFinType1[which(is.na(train.df$BsmtFinType1))]<- 'LwQ'
+
+sum(is.na(train.df$BsmtFinType1))
+```
+
+BsmtFinSF1
+```{r}
+sum(is.na(test.df$BsmtFinSF1))
+#count is 1
+
+test.df$BsmtFinSF1[which(is.na(test.df$BsmtFinSF1))]<-mean(test.df$BsmtFinSF1, na.rm= TRUE)
+
+sum(is.na(test.df$BsmtFinSF1))
+#count is 0
+
+sum(is.na(train.df$BsmtFinSF1))
+#count is 0
+```
+
+BsmtFinType2
+```{r}
+sum(is.na(test.df$BsmtFinType2))
+#count is 42
+
+test.df$BsmtFinType2[which(is.na(test.df$BsmtFinType2))]<-'ALQ'
+
+sum(is.na(test.df$BsmtFinType2))
+#count is 0
+
+sum(is.na(train.df$BsmtFinType2))
+#count is 38
+
+train.df$BsmtFinType2[which(is.na(train.df$BsmtFinType2))]<-'ALQ'
+
+sum(is.na(train.df$BsmtFinType2))
+#count is 0
+```
+
+BsmtFinSF2
+```{r}
+sum(is.na(test.df$BsmtFinSF2))
+#count is 1
+
+test.df$BsmtFinSF2[which(is.na(test.df$BsmtFinSF2))]<-mean(test.df$BsmtFinSF2, na.rm=TRUE)
+
+sum(is.na(test.df$BsmtFinSF2))
+#count is 0
+
+sum(is.na(train.df$BsmtFinSF2))
+#count is 0
+```
+
+BsmtUnfSF
+```{r}
+sum(is.na(test.df$BsmtUnfSF))
+#count is 1
+
+test.df$BsmtUnfSF[which(is.na(test.df$BsmtUnfSF))]<-mean(test.df$BsmtUnfSF, na.rm=TRUE)
+
+sum(is.na(test.df$BsmtUnfSF))
+#count is 0
+
+sum(is.na(train.df$BsmtUnfSF))
+#count is 0
+```
+
+TotalBsmtSF
+```{r}
+sum(is.na(test.df$TotalBsmtSF))
+#count is 1
+
+test.df$TotalBsmtSF[which(is.na(test.df$TotalBsmtSF))]<-mean(test.df$TotalBsmtSF, na.rm=TRUE)
+
+sum(is.na(test.df$TotalBsmtSF))
+#count is 0
+
+sum(is.na(train.df$TotalBsmtSF))
+#count is 0
+```
+
+Electrical
+```{r}
+sum(is.na(test.df$Electrical))
+#count is 0
+
+sum(is.na(train.df$Electrical))
+#count is 1
+
+train.df$Electrical[which(is.na(train.df$Electrical))]<-'FuseA'
+
+sum(is.na(train.df$Electrical))
+#count is 0
+```
+
+BsmtFullBath
+```{r}
+sum(is.na(test.df$BsmtFullBath))
+#count is 2
+
+test.df$BsmtFullBath[which(is.na(test.df$BsmtFullBath))] <- 2
+ 
+sum(is.na(test.df$BsmtFullBath))
+#count is 0
+
+sum(is.na(train.df$BsmtFullBath))
+#count is 0
+```
+
+BsmtHalfBath
+```{r}
+sum(is.na(test.df$BsmtHalfBath))
+#count is 2
+
+test.df$BsmtHalfBath[which(is.na(test.df$BsmtHalfBath))] <- 2
+
+sum(is.na(test.df$BsmtHalfBath))
+#count is 0
+
+```
+
+KitchenQual
+```{r}
+sum(is.na(test.df$KitchenQual))
+#count is 1
+
+test.df$KitchenQual[which(is.na(test.df$KitchenQual))] <- 'Gd'
+
+sum(is.na(test.df$KitchenQual))
+#count is 0
+```
+
+Functional
+```{r}
+sum(is.na(test.df$Functional))
+#count is 2
+
+test.df$Functional[which(is.na(test.df$Functional))] <- 'Min1'
+
+sum(is.na(test.df$Functional))
+#count is 0
+
+sum(is.na(train.df$Functional))
+#count is 0
+```
+
+FireplaceQu
+```{r}
+sum(is.na(test.df$FireplaceQu))
+#count is 730
+
+test.df$FireplaceQu[which(is.na(test.df$FireplaceQu))] <- 'Gd'
+
+sum(is.na(test.df$FireplaceQu))
+#count is 0
+
+sum(is.na(train.df$FireplaceQu))
+#count is 690
+
+train.df$FireplaceQu[which(is.na(train.df$FireplaceQu))] <- 'Gd'
+
+sum(is.na(train.df$FireplaceQu))
+#counts is 0
+```
+
+GarageType
+```{r}
+sum(is.na(test.df$GarageType))
+#count is 76
+
+test.df$GarageType[which(is.na(test.df$GarageType))] <- 'Detchd'
+
+sum(is.na(test.df$GarageType))
+#count is 0
+
+sum(is.na(train.df$GarageType))
+#count is 81
+
+train.df$GarageType[which(is.na(train.df$GarageType))] <- 'Detchd'
+
+sum(is.na(train.df$GarageType))
+#count is 0
+```
+
+GarageYrBlt
+```{r}
+sum(is.na(test.df$GarageYrBlt))
+#count is 78
+
+test.df$GarageYrBlt[which(is.na(test.df$GarageYrBlt))] <- 2004
+
+sum(is.na(test.df$GarageYrBlt))
+#count is 0
+
+sum(is.na(train.df$GarageYrBlt))
+#count is 81
+
+train.df$GarageYrBlt[which(is.na(train.df$GarageYrBlt))] <- 2004
+
+sum(is.na(train.df$GarageYrBlt))
+#count is 0
+```
+
+GarageFinish
+```{r}
+sum(is.na(test.df$GarageFinish))
+#count is 78
+
+test.df$GarageFinish[which(is.na(test.df$GarageFinish))] <- 'RFn'
+
+sum(is.na(test.df$GarageFinish))
+#count is 0
+
+sum(is.na(train.df$GarageFinish))
+#count is 81
+
+train.df$GarageFinish[which(is.na(train.df$GarageFinish))] <- 'RFn'
+
+sum(is.na(train.df$GarageFinish))
+#count is 0
+```
+
+GarageCars
+```{r}
+sum(is.na(test.df$GarageCars))
+#count is 78
+
+test.df$GarageCars[which(is.na(test.df$GarageCars))] <- 2
+
+sum(is.na(test.df$GarageCars))
+#count is 0
+```
+
+GarageArea
+```{r}
+sum(is.na(test.df$GarageArea))
+#count is 1
+
+test.df$GarageArea[which(is.na(test.df$GarageArea))] <- mean(test.df$GarageArea, na.rm= TRUE)
+
+sum(is.na(test.df$GarageArea))
+#count is 0
+
+sum(is.na(train.df$GarageArea))
+#count is 0
+```
+
+GarageQual
+```{r}
+sum(is.na(test.df$GarageQual))
+#count is 78
+
+test.df$GarageQual[which(is.na(test.df$GarageQual))] <- 'Fa' 
+
+sum(is.na(test.df$GarageQual))
+#count is 0
+
+sum(is.na(train.df$GarageQual))
+#count is 81
+
+train.df$GarageQual[which(is.na(train.df$GarageQual))] <- 'Fa' 
+
+sum(is.na(train.df$GarageQual))
+#count is 0
+```
+
+GarageCond
+```{r}
+sum(is.na(test.df$GarageCond))
+#count is 78
+
+test.df$GarageCond[which(is.na(test.df$GarageCond))] <- 'TA' 
+
+sum(is.na(test.df$GarageCond))
+#count is 0
+
+sum(is.na(train.df$GarageCond))
+#count is 81
+
+train.df$GarageCond[which(is.na(train.df$GarageCond))] <- 'TA' 
+
+sum(is.na(train.df$GarageCond))
+#count is 0
+```
+
+SaleType
+```{r}
+sum(is.na(test.df$SaleType))
+#count is 1
+
+test.df$SaleType[which(is.na(test.df$SaleType))] <- 'COD' 
+
+sum(is.na(test.df$SaleType))
+#count is 0
+
+sum(is.na(train.df$SaleType))
+```
+
+Removing Fence column due to poor data quality
+```{r}
+sum(is.na(test.df$Fence))
+
+test.df$Fence <- NULL
+
+sum(is.na(test.df$Fence))
+#count is 0
+
+train.df$Fence<- NULL
+
+sum(is.na(train.df$Fence))
+#count is 0
+```
+
+Removing MiscFeature Column due to poor data quality
+```{r}
+sum(is.na(test.df$MiscFeature))
+
+test.df$MiscFeature <- NULL
+
+sum(is.na(test.df$MiscFeature))
+#count is 0
+
+train.df$MiscFeature<- NULL
+
+sum(is.na(train.df$MiscFeature))
+#count is 0
+```
+
+
+Removing PoolQC Column due to poor data quality
+```{r}
+sum(is.na(test.df$PoolQC))
+#count is 1456
+
+test.df$PoolQC <- NULL
+
+sum(is.na(test.df$PoolQC))
+#count is 0
+
+sum(is.na(train.df$PoolQC))
+#count is 1453 
+
+train.df$PoolQC<- NULL
+
+sum(is.na(train.df$PoolQC))
+#count is 0
+```
+
+
+```{r}
+summary(arsenal::comparedf(test.df,train.df))
+```
+
+All NA records have been cleaned up we can explore the variables with high correlation.  
+
+The below for loop statement compares each column in train.df with SalePrice and prints out columns with correlation greater than .5 since correlation is considered strong if the result is between .5 and 1. 
+```{r}
+for (col in colnames(train.df)){
+    if(is.numeric(train.df[,col])){
+        if( abs(cor(train.df[,col],train.df$SalePrice)) > 0.5){
+            print(col)
+            print( round(cor(train.df[,col],train.df$SalePrice),2) )
+        }
+    }
+}
+```
+The strongest collinearity is with the variable 'OverallQual' at 0.79. All the printed variables can be considered predictor variables in our model.
+
+
+We can show a linear regression model that depicts the high collinearity between 'OverallQual' and 'SalePrice' in the train.df below
+```{r}
+cor1<-ggplot(data = train.df, aes(x = OverallQual, y = SalePrice)) +
+  geom_jitter() +  geom_smooth(method = "lm", se = FALSE)+labs(title="Scatter plot of OverallQual and SalePrice", x="OverallQual",y="Price")
+cor1
+```
+
+Below is a linear regression between YearBuilt and SalePrice showing slightly greater variation between some of the oberservations
+```{r}
+cor2<-ggplot(data = train.df, aes(x = YearBuilt, y = SalePrice)) +
+  geom_jitter() +  geom_smooth(method = "lm", se = FALSE)+labs(title="Scatter plot of YearBuilt and SalePrice", x="YearBuilt",y="Price")
+cor2
+```
+
+
+```{r}
+cor_all<- ggpairs(train.df, columns= c("SalePrice","OverallQual","YearBuilt","YearRemodAdd","TotalBsmtSF","X1stFlrSF","GrLivArea","FullBath","TotRmsAbvGrd","GarageCars","GarageArea"))
+cor_all
+```
+
+corrplot of all the numeric features
+```{r}
+numeric_train.df<- train.df %>% select_if(is.numeric)
+corrplot(cor(numeric_train.df, use="pairwise"), number.cex=5/ncol(numeric_train.df))
+```
+##################################################################
+#Feature engineering/scaling/normalizing
+##################################################################
+
+combining the two data sets to do feature cleaning / feature engineering      
+```{r}
+comb.df<- rbind(dplyr::select(train.df, -SalePrice), test.df)
+```
+
+
+Creating derived features to reduce the number of variables and combining similar features.
+```{r}
+comb.df <- comb.df %>% 
+            mutate(total_building_SF_non_porch = X1stFlrSF + X2ndFlrSF + TotalBsmtSF + GarageArea,
+            total_porch_and_deck_SF = WoodDeckSF + OpenPorchSF + EnclosedPorch + X3SsnPorch + ScreenPorch, 
+            OverallQual_plus_Cond = OverallQual + OverallCond, total_bathrooms = BsmtFullBath + (BsmtHalfBath*0.5) + FullBath + (HalfBath*0.5), 
+          years_between_build_and_remodel = YearRemodAdd - YearBuilt, number_of_non_bedrooms = TotRmsAbvGrd - BedroomAbvGr)
+```
+
+
+One hot encode using vtreat package that prepares the data for predictive modeling, vtreat automates variable treatment in R.
+```{r}
+comb.df <- comb.df %>% mutate_if(is.character,as.factor)
+varlist <- colnames(comb.df %>%  dplyr::select(-label))
+treatplan <- designTreatmentsZ(comb.df, varlist)
+scoreFrame <- treatplan %>% 
+            magrittr::use_series(scoreFrame) %>% 
+            dplyr::select(varName, origName, code)
+```
+
+This will drop feature types that are not in code list using mcgrittr package  
+```{r}
+newvars <- scoreFrame %>%
+            filter(code %in% c("clean", "lev", "isBAD")) %>%
+            use_series(varName)
+
+data.treat <- prepare(treatplan, comb.df, varRestriction = newvars)
+
+complete_data_labels <- comb.df %>%  dplyr::select(Id, label)
+```
+
+
+joins the train and test labels back to the complete data set that is one hot encoded
+```{r}
+comb.df <- left_join(data.treat, complete_data_labels, by=c("Id"))
+```
+
+
+take the log of features that have high skew then find numeric columns to calculate skew for
+```{r}
+numeric_columns <- select_if(comb.df, is.numeric) %>%
+            dplyr::select(-Id) %>%
+            colnames()
+
+skew_df <- as.data.frame(
+            sapply(comb.df %>% select_(.dots = numeric_columns), 
+                   function(x) skewness(x)
+      )
+)
+```
+
+
+```{r}
+skew_df <- rownames_to_column(skew_df, var = "feature") %>% dplyr::rename(skew = 2)
+
+features_to_log_transform <- filter(skew_df, skew > 2.5 | skew < -2.5) %>% 
+            dplyr::select(feature)
+features_to_log_transform <- c(features_to_log_transform$feature)
+
+### log transform features which have high skew
+comb.df <- comb.df %>% 
+            mutate_at(vars(features_to_log_transform), 
+                                 function(x) log1p(x))
+```
+
+###################################################################Building the model
+##################################################################
+
+Join in target variable back to the training data
+```{r}
+final_train.df <- comb.df %>% filter(label=="train")
+final_train.df <- final_train.df %>% 
+      left_join(dplyr::select(train.df, Id, SalePrice),by=c("Id"))
+```
+
+
+predict the log of the SalePrice which meets normal distribution assumptions
+```{r}
+final_train.df <- final_train.df %>% 
+            mutate(SalePrice_log = log1p(SalePrice)) %>%
+            dplyr::select(-Id,-SalePrice,-label)
+```
+
+
+### Use ranger RF model to filter down the feature space
+```{r}
+ranger_feature_selection <- ranger(formula = SalePrice_log ~ .,
+                       importance = 'impurity',
+                       data    = final_train.df)
+```
+
+
+Use custom function to check model prediction
+```{r}
+rmse(final_train.df$SalePrice_log,
+         predict(ranger_feature_selection, data=final_train.df)$predictions)
+```
+
+I used the ranger model on the paired down feature set
+```{r}
+ranger_model <- ranger(formula = SalePrice_log ~ .,
+                         importance = 'impurity',
+                         data = final_train.df)
+```
+
+
+apply a feature importance rating
+```{r}
+feature_importance <- data.frame(importance_score = ranger_model$variable.importance)
+feature_importance <- rownames_to_column(feature_importance, var = "features")
+```
+
+
+Create XGB model using caret
+```{r}
+xgb_grid <- expand.grid(
+            nrounds = 500,
+            eta = 0.3,
+            max_depth = 2, 
+            gamma=0,
+            colsample_bytree = 1,
+            min_child_weight = 1,
+            subsample = 1)
+```
+
+
+create control using caret
+```{r}
+train_control <- caret::trainControl(
+            method = "none",
+            verboseIter = FALSE,
+            allowParallel = TRUE)
+```
+
+
+creates variables for model
+```{r}
+x <- as.matrix(final_train.df %>%  dplyr::select(-SalePrice_log))
+y <- final_train.df$SalePrice_log
+```
+
+
+build model
+```{r}
+xgb_model <- caret::train(
+            x= x,
+            y= y,
+            trControl = train_control,
+            tuneGrid = xgb_grid,
+            method = "xgbTree",
+            verbose = FALSE)
+```
+
+View most important XGB features
+```{r}
+### View most important XGB features
+head(varImp(xgb_model)$importance, 10) %>%
+            rownames_to_column(var = "feature") %>%
+            ggplot(aes(x=reorder(feature,Overall), y=Overall, fill=Overall)) +
+            geom_col() +
+            coord_flip() +
+            theme(legend.position = "none") +
+            labs(subtitle = "Top 10 Most Important XGB Features")
+```
+Based on my model, the most important predictor by far on house price is the total square footage excluding porch and OverQuall of the home.
+
+lambdas for ridge 
+```{r}
+lambdas <- 10^seq(10, -2, length = 100)
+```
+
+
+Ridge Regression:
+```{r}
+ridge_regression <- glmnet(x, y, alpha = 0, lambda = lambdas)
+
+cv_ridge_regression <- cv.glmnet(x, y, alpha = 0, lambda = lambdas)
+
+best_lambda_ridge <- cv_ridge_regression$lambda.min
+```
+
+
+Use custom function to check model prediction
+```{r}
+rmse(final_train.df$SalePrice_log,
+         predict(ridge_regression, s=best_lambda_ridge, newx = x))
+```
+Model was improved by 4%
+
+```{r}
+test_predictions = predict(xgb_model, newdata=final_train.df)
+```
+
+Output test submission in Kaggle requested format
+```{r}
+submission = read.csv("sample_submission.csv")
+submission$SalePrice = test_predictions
+write.csv(submission, "home_prices_xgb_sub1.csv", row.names=FALSE)
+```
+
